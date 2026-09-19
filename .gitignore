@@ -1,0 +1,7 @@
+bendirstat
+bendirstat.gpu
+*.ppm
+*.png
+*.c.tmp
+CLAUDE.md
+.claude/
