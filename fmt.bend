@@ -80,6 +80,10 @@ def bar(+n: Nat, total: Nat, +w: Nat) -> String:
 def pad(+s: String, w: Nat) -> String:
   String.repeat(" ", Nat.sub(w, String.length(s))) ++ s
 
+# a directory's path with one separator after it ("/" stays "/")
+def slashed(+s: String) -> String:
+  Bool.pick(String, String.ends_with(s, "/"), s, s ++ "/")
+
 # s padded with spaces on the right to w cells
 def padr(+s: String, w: Nat) -> String:
   s ++ String.repeat(" ", Nat.sub(w, String.length(s)))

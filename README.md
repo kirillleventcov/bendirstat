@@ -31,14 +31,17 @@ seconds on the same tree.
 
 ## Build and run
 
-Bend 2 (`curl -fsSL https://bend-lang.com/install.sh | sh`) and clang 14+.
-On Linux the treemap window needs `libx11-dev`.
+Bend 2.0.39 or newer (`curl -fsSL https://bend-lang.com/install.sh | sh`)
+and clang 14+. On Linux the treemap window needs `libx11-dev`. The scanner
+uses the runtime's internals, which carry no ABI promise between Bend
+releases: rebuild after every `bend update`.
 
 ```
 bend main.bend -o bendirstat     # build the native binary
 ./bendirstat                     # scan $HOME and print the report
 ./bendirstat /usr/share --gui    # scan a path and open the treemap
-bend PROOF.bend                  # check the laws: "All terms check."
+bend PROOF.bend                  # check the laws: "ALL PROOFS CHECK"
+bend PROOF.bend --verdict        # recheck with the Lean kernel (Lean 4.34)
 ```
 
 `bend main.bend -- <path>` runs the JavaScript lane instead of building; it
@@ -96,7 +99,8 @@ block, so the whole frame forks four ways per level on every core.
 ## How it works
 
 ```
-fs.bend        the tree, the scanner effect, and the parallel folds over it
+fs.bend        the tree, names, and the parallel folds over it
+scan.bend      the scanner effect (apart, so the proofs import no foreign code)
 report.bend    the text report: the tree with bars, largest files, extensions
 treemap.bend   the layout, the quadtree rasterizer, and the window loop
 fmt.bend       sizes, shares, bars, colors
@@ -106,27 +110,34 @@ LAWS.bend      the claims about the parallel folds
 PROOF.bend     their proofs
 ```
 
-**Scanning** is a foreign effect, `Fs.scan`, written in C the way Base's own
+**Scanning** is a foreign effect, `Scan.scan`, written in C the way Base's own
 effects are. A pool of threads (one per CPU) works a shared stack of
 directories: each thread opens one, lists it with `getdents64`, asks `statx`
 for every entry, appends the entries to an arena and pushes the
 subdirectories. The finished arena is laid out as Bend terms on the event
 loop's thread: `FsFile{name, size}` and `FsDir{name, size, kids}`, sizes as
-native `Nat` immediates, so a 338 GiB tree needs no bignums. Bend's runtime
-refcounts a type only when the program shares it, and reads it raw
-otherwise; the effect takes a probe node built by the program and inspects
-its fields to learn which, so the C stays right whatever the Bend side does
-with the tree.
+native `Nat` immediates (up to 256 TiB). A name is an `Fs.Name`: its UTF-8
+bytes, six to a native `Nat`, a cell per six bytes where a `String` costs a
+cell and a reference count per character; it is decoded to text only for
+the rows printed. Bend's runtime refcounts a constructor only when the
+program shares it, and the compiler records which; the effect follows that
+record. `CID()` in an effect names only its own module's and Base's
+constructors, so the program passes a probe value, and the effect reads the
+tags of `FsFile`, `FsDir` and the name cells off it.
 
-**Everything after the scan is pure Bend.** `sum` gives every directory the
-total under it and `sort` orders every directory's entries by size, both as
-fork-join folds: a directory's entries and the rest of its list are handled
-by a parallel let, so the runtime spreads the tree over every core. The
-report's largest-files pass keeps a bounded ordered list per subtree and
-merges them up the tree, again in parallel; the extension tally packs each
-extension into one `Nat` (six bits a character) and counts in in-place
-arrays, so no string is built per file. The treemap layout and the frame are
-parallel the same way.
+**Everything after the scan is pure Bend.** `tidy` gives every directory the
+total under it and orders its entries by size in one fork-join pass (the
+law `tidy_is_sort_sum` holds it to `sort` after `sum`): a directory's
+entries and the rest of its list are handled by a parallel let, so the
+runtime spreads the tree over every core. The report's largest-files pass
+keeps a bounded ordered list per subtree and merges them up the tree, again
+in parallel, carrying each file's directories as a shared chain of names,
+so a path is built only for the rows printed. The extension tally reads
+each name backwards from its end to the last dot (most names are touched
+for a few bytes), packs the extension into one `Nat` (six bits a
+character), and counts in a trie on that code, two bits a level: an empty
+tally is free and two merge in the time of the smaller, so every directory
+forks. The treemap layout and the frame are parallel the same way.
 
 **The laws** pin the parallel folds to sequential specifications, in the
 style of Bend's `pure_par_sum` demo:
@@ -134,6 +145,8 @@ style of Bend's `pure_par_sum` demo:
 - `sum_is_total`: the sizes at the top of a summed list add up to the
   sequential total of every byte under it;
 - `sum_keeps_names`: summing keeps the entries, in order;
+- `sum_keeps_shape`: summing changes nothing but sizes, at every depth;
+- `tidy_is_sort_sum`: the fused pass `prep` runs is `sort` after `sum`;
 - `count_is_spec`: the parallel count is the sequential count of files and
   directories.
 
@@ -142,7 +155,7 @@ style of Bend's `pure_par_sum` demo:
 ## Numbers
 
 Home directory, 1,867,846 files and 188,236 directories, 338 GiB, warm cache,
-16 threads:
+16 threads, measured before the packed names and the fused pass:
 
 | step                                  | time    |
 |---------------------------------------|---------|
@@ -152,5 +165,22 @@ Home directory, 1,867,846 files and 188,236 directories, 338 GiB, warm cache,
 | report: tree, files, extensions       | 800 ms  |
 | `du -s ~` for comparison              | 3150 ms |
 
-Peak memory is about 950 MiB for that tree, roughly 450 bytes an entry, most
-of it the names (Bend strings are lists of characters).
+Peak memory was about 950 MiB for that tree, roughly 450 bytes an entry,
+most of it the names as Strings.
+
+A synthetic tree of 954,561 files and 45,449 directories in tmpfs, 4 vCPUs,
+Bend 2.0.39, before and after the packed names, the fused pass and the
+extension trie (typical of four runs each):
+
+| step                                  | before        | after   |
+|---------------------------------------|---------------|---------|
+| walk (C, 4 threads, unchanged)        | 440-530 ms    | same    |
+| lay the tree out as Bend terms        | 260-1600 ms   | 100 ms  |
+| sum and sort                          | 130 ms        | 46 ms   |
+| report: tree                          | 65 ms         | 28 ms   |
+| report: largest files                 | 150 ms        | 60 ms   |
+| report: extensions                    | 440 ms        | 80 ms   |
+| whole run, wall clock                 | 2.2-3.2 s     | 1.0 s   |
+| peak memory                           | 477 MiB       | 170 MiB |
+
+`du -s` takes 1.7 s on the same tree.
