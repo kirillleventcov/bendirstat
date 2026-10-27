@@ -1,8 +1,8 @@
-// Fs.scan: a parallel walk of a directory tree on helper threads.
+// Scan.scan: a parallel walk of a directory tree on helper threads.
 // ================================================================
 //
-// The effect takes a path, a flags word, a thread count and a probe
-// node, and answers the tree beside the count of entries it could not
+// The effect takes a path, a flags word, a thread count and a probe,
+// and answers the tree beside the count of entries it could not
 // read. The walk is a pool of threads over a shared stack of
 // directories: each thread opens one, lists it with getdents64, asks
 // statx for every entry, appends the entries to the directory's node
@@ -10,11 +10,15 @@
 //
 // The pack step, on the loop's thread, lays the arena tree out as Bend
 // terms: FsFile{name, size} and FsDir{name, size, kids}, sizes as Nat
-// immediates. A type whose values the program shares carries a
-// reference count in front of every node, so every field must be
-// sealed; the runtime keeps no per-type flag, so the probe (an FsDir
-// the program built on its heap) tells: its fields are sealed exactly
-// when Fs is shared. Con cells and strings follow the IO_HOTS mask.
+// immediates, names as Fs.Name: the name's bytes six to a Nat, the
+// first byte highest (a cell per six bytes, where a String is a cell and
+// a count per character). Fs.Tree is declared in another module than
+// this effect, and CID() names only this module's and Base's
+// constructors, so the program hands over a probe,
+// FsDir{NMore{_, NEnd{}}, _, [FsFile{_, _}]}, and the tags are read off
+// it. A type whose values the program shares carries a reference count
+// in front of every field; the compiler records that per constructor,
+// and io_seal follows it.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -54,6 +58,10 @@ typedef struct {
   u32             flags;
   u64             root_dev;
   _Atomic u64     errors;
+  u64             cid_file;  // the tags of FsFile, FsDir, NMore and NEnd,
+  u64             cid_dir;   // off the probe
+  u64             cid_more;
+  u64             cid_end;
   FsNode*         root;
   u64             began;
   u64             walked;
@@ -333,18 +341,27 @@ static void scan_call(IoWork* w) {
 // Pack
 // ----
 
-static Term fs_seal(Env e, Term t, bool hot) {
-  return hot ? rfc_seal(e, t) : t;
+// a name: its bytes, six to a chunk, the first byte highest; no byte is
+// 0, so a chunk's value tells its length
+static Term fs_name(Env e, FsScan* s, const char* p, u32 n) {
+  Term nm = term_pak(s->cid_end, 0);
+  for (u32 i = (n + 5) / 6; i > 0; i -= 1) {
+    u32 at  = (i - 1) * 6;
+    u32 end = at + 6 < n ? at + 6 : n;
+    u64 c   = 0;
+    for (u32 j = at; j < end; j += 1) {
+      c = (c << 8) | (uint8_t)p[j];
+    }
+    nm = io_node(e, s->cid_more, c, nm);
+  }
+  return nm;
 }
 
-static Term fs_term(Env e, FsNode* n, bool hot) {
-  Term name = io_str(e, n->name, n->len);
+static Term fs_term(Env e, FsScan* s, FsNode* n) {
+  Term name = fs_name(e, s, n->name, n->len);
   u64  size = n->size > NAT_IMM ? NAT_IMM : n->size;
   if (!n->dir) {
-    Loc l = heap_alloc(e, cls_fit(2));
-    e.mem[l]     = fs_seal(e, name, hot);
-    e.mem[l + 1] = size;
-    return term_ctr(CID_FSFILE, l);
+    return io_node(e, s->cid_file, name, size);
   }
   // the chain is in scan order; a list conses from the end
   FsNode* rev = NULL;
@@ -354,15 +371,15 @@ static Term fs_term(Env e, FsNode* n, bool hot) {
     rev = k;
     k = nx;
   }
-  Term xs = term_pak(CID_NIL, 0);
+  Term xs = term_pak(CID(Nil), 0);
   for (FsNode* k = rev; k != NULL; k = k->next) {
-    xs = io_node(e, CID_CON, fs_term(e, k, hot), xs, IO_HOTS & 16);
+    xs = io_node(e, CID(Con), fs_term(e, s, k), xs);
   }
-  Loc l = heap_alloc(e, cls_fit(3));
-  e.mem[l]     = fs_seal(e, name, hot);
+  u64 l = heap_alloc(e, cls_fit(3));
+  e.mem[l]     = io_seal(e, name, s->cid_dir);
   e.mem[l + 1] = size;
-  e.mem[l + 2] = fs_seal(e, xs, hot);
-  return term_ctr(CID_FSDIR, l);
+  e.mem[l + 2] = io_seal(e, xs, s->cid_dir);
+  return term_ctr(s->cid_dir, l);
 }
 
 static void scan_free(FsScan* s) {
@@ -384,8 +401,7 @@ static Term scan_pack(Env e, IoWork* w) {
   if (w->code != 0) {
     r = io_fail(e, w->code, NULL);
   } else {
-    bool hot  = w->word != 0;
-    Term tree = fs_term(e, s->root, hot);
+    Term tree = fs_term(e, s, s->root);
     u64  errs = atomic_load(&s->errors);
     r = io_done(e, io_tup(e, tree, errs > NAT_IMM ? NAT_IMM : errs));
     if (getenv("BENDIRSTAT_DEBUG") != NULL) {
@@ -393,7 +409,7 @@ static Term scan_pack(Env e, IoWork* w) {
       fprintf(stderr, "fs_scan: %u threads, walk %llu ms, pack %llu ms, %s\n",
         s->threads, (unsigned long long)((s->walked - s->began) / 1000000),
         (unsigned long long)((packed - s->walked) / 1000000),
-        hot ? "sealed" : "raw");
+        cid_hot(s->cid_dir) ? "sealed" : "raw");
     }
   }
   free(w->text);
@@ -401,13 +417,17 @@ static Term scan_pack(Env e, IoWork* w) {
   return r;
 }
 
-// Is Fs a shared type? The probe is an FsDir the program built on its
-// heap: the emitter seals every field of a shared type's node.
-static bool fs_probe_hot(Env e, Term probe) {
-  Loc  l   = term_peek(e, probe);
-  bool hot = term_rfc(e.mem[l]) || term_rfc(e.mem[l + 2]);
+// the tags of the probe FsDir{NMore{_, NEnd{}}, _, [FsFile{_, _}]}; the
+// probe is dropped
+static void fs_probe(Env e, Term probe, FsScan* s) {
+  u64  l    = term_peek(e.mem, probe);
+  Term name = e.mem[l];
+  Term kids = e.mem[l + 2];
+  s->cid_dir  = term_aux(probe);
+  s->cid_file = term_aux(e.mem[term_peek(e.mem, kids)]);
+  s->cid_more = term_aux(name);
+  s->cid_end  = term_aux(e.mem[term_peek(e.mem, name) + 1]);
   term_sink(e, probe);
-  return hot;
 }
 
 Term scan_run(Env e, Term* f, IoWork* w) {
@@ -418,12 +438,12 @@ Term scan_run(Env e, Term* f, IoWork* w) {
     long c = cpu_count();
     threads = c < 1 ? 1 : (u32)c;
   }
-  w->word = fs_probe_hot(e, f[3]);
   if (io_nul(w->text, n) || n == 0) {
     free(w->text);
-    return io_fail(e, EINVAL, "Fs.scan: an empty path or one with a NUL");
+    return io_fail(e, EINVAL, "Scan.scan: an empty path or one with a NUL");
   }
   FsScan* s = io_mem(calloc(1, sizeof *s));
+  fs_probe(e, f[3], s);
   pthread_mutex_init(&s->lock, NULL);
   pthread_mutex_init(&s->hlock, NULL);
   pthread_mutex_init(&s->alock, NULL);
@@ -437,5 +457,5 @@ Term scan_run(Env e, Term* f, IoWork* w) {
 }
 
 static void __attribute__((constructor)) scan_use(void) {
-  io_eff(CID_SCAN, scan_run, 0);
+  io_eff(CID(scan), scan_run);
 }

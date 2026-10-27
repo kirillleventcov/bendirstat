@@ -10,6 +10,7 @@
 #   bend main.bend -o bendirstat && ./bendirstat ~
 import Base
 import ./fs.bend as Fs
+import ./scan.bend as Scan
 import ./fmt.bend as Fmt
 import ./report.bend as Report
 import ./treemap.bend as Treemap
@@ -68,99 +69,43 @@ def tok.num(+s: String, m: Maybe<&2, Nat>) -> Tok:
     case None{}:
       TText{s}
 
-def tok.13(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TSnap{}
-    case False{}:
+# an option's spelling and its token
+type Spell is Data:
+  Spell{text: String, tok: Tok}
+
+# the options, by their spelling
+def table() -> List<&2, Spell>:
+  [Spell{"--depth", TDepth{}}, Spell{"--top", TTop{}},
+    Spell{"--files", TFiles{}}, Spell{"--exts", TExts{}},
+    Spell{"--apparent", TApparent{}}, Spell{"--cross-fs", TCross{}},
+    Spell{"--links", TLinks{}}, Spell{"--jobs", TThreads{}},
+    Spell{"--gui", TGui{}}, Spell{"--no-report", TNoReport{}},
+    Spell{"--plain", TPlain{}}, Spell{"-h", THelp{}}, Spell{"--help", THelp{}},
+    Spell{"--snapshot", TSnap{}}]
+
+# is s the spelling at the head of the table?
+def tok.is(xs: List<&2, Spell>, +s: String) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Spell{k, t} <> rest:
+      String.eq(k, s)
+
+# the option spelled s, a number, or text; hit is the verdict on the head
+def tok.find(xs: List<&2, Spell>, +s: String, hit: Bool) -> Tok:
+  match xs:
+    case Nil{}:
       tok.num(s, Nat.read(s))
-
-def tok.12(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      THelp{}
-    case False{}:
-      tok.13(s, String.eq(s, "--snapshot"))
-
-def tok.11(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TPlain{}
-    case False{}:
-      tok.12(s, Bool.or(String.eq(s, "--help"), String.eq(s, "-h")))
-
-def tok.10(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TNoReport{}
-    case False{}:
-      tok.11(s, String.eq(s, "--plain"))
-
-def tok.9(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TGui{}
-    case False{}:
-      tok.10(s, String.eq(s, "--no-report"))
-
-def tok.8(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TThreads{}
-    case False{}:
-      tok.9(s, String.eq(s, "--gui"))
-
-def tok.7(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TLinks{}
-    case False{}:
-      tok.8(s, String.eq(s, "--jobs"))
-
-def tok.6(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TCross{}
-    case False{}:
-      tok.7(s, String.eq(s, "--links"))
-
-def tok.5(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TApparent{}
-    case False{}:
-      tok.6(s, String.eq(s, "--cross-fs"))
-
-def tok.4(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TExts{}
-    case False{}:
-      tok.5(s, String.eq(s, "--apparent"))
-
-def tok.3(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TFiles{}
-    case False{}:
-      tok.4(s, String.eq(s, "--exts"))
-
-def tok.2(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TTop{}
-    case False{}:
-      tok.3(s, String.eq(s, "--files"))
-
-def tok.1(+s: String, hit: Bool) -> Tok:
-  match hit:
-    case True{}:
-      TDepth{}
-    case False{}:
-      tok.2(s, String.eq(s, "--top"))
+    case Spell{k, t} <> +rest:
+      match hit:
+        case True{}:
+          t
+        case False{}:
+          tok.find(rest, s, tok.is(rest, s))
 
 def tok(+s: String) -> Tok:
-  tok.1(s, String.eq(s, "--depth"))
+  +xs = table()
+  tok.find(xs, s, tok.is(xs, s))
 
 def parse(ts: List<Tok>, o: Opts) -> Opts:
   match ts o:
@@ -231,7 +176,7 @@ def parse(ts: List<Tok>, o: Opts) -> Opts:
     case t <> rest Opts{path, depth, top, files, exts, flags, threads, color,
       gui, report, help, bad, snap}:
       Opts{path, depth, top, files, exts, flags, threads, color, gui, report,
-        help, "an option is missing its value; see --help", snap}
+        help, "an option is missing its value; see -h", snap}
 
 # Run
 # ---
@@ -328,8 +273,8 @@ def run.scan(
 ) -> IO(Unit):
   do IO<Unit>:
     +t0 : Nat <- IO.now()
-    r : Result<&1, &1, U32 & String, Fs.Tree & Nat> <- Fs.scan(path, flags,
-      threads, Fs.probe(1n+t0))
+    r : Result<&1, &1, U32 & String, Fs.Tree & Nat> <- Scan.scan(path, flags,
+      threads, Fs.probe())
     got : Fs.Tree & Nat <- scanned(path, r)
     t1 : Nat <- IO.now()
     analyze(got, t0, t1, depth, top, files, exts, color, gui, report, snap)

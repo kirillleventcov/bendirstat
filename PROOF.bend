@@ -23,10 +23,49 @@ def Laws.sum_keeps_names(xs):
     case Nil{}:
       {==}
     case Fs.FsFile{nm, sz} <> t:
-      %Laws.sum_keeps_names(t) : {nm <> Fs.names(Fs.sum(t)) == nm <> _ : List<&2, String>}
+      %Laws.sum_keeps_names(t) : {nm <> Fs.names(Fs.sum(t)) == nm <> _ : List<&2, Fs.Name>}
       {==}
     case Fs.FsDir{nm, sz, ks} <> t:
-      %Laws.sum_keeps_names(t) : {nm <> Fs.names(Fs.sum(t)) == nm <> _ : List<&2, String>}
+      %Laws.sum_keeps_names(t) : {nm <> Fs.names(Fs.sum(t)) == nm <> _ : List<&2, Fs.Name>}
+      {==}
+
+def Laws.sum_keeps_shape(xs):
+  match xs:
+    case Nil{}:
+      {==}
+    case Fs.FsFile{nm, sz} <> t:
+      %Laws.sum_keeps_shape(t) : {Fs.FsFile{nm, 0n} <> Fs.shape(Fs.sum(t)) == Fs.FsFile{nm, 0n} <> _ : List<&2, Fs.Tree>}
+      {==}
+    case Fs.FsDir{nm, sz, ks} <> t:
+      %Laws.sum_keeps_shape(ks) : {Fs.FsDir{nm, 0n, Fs.shape(Fs.sum(ks))} <> Fs.shape(Fs.sum(t)) == Fs.FsDir{nm, 0n, _} <> Fs.shape(t) : List<&2, Fs.Tree>}
+      %Laws.sum_keeps_shape(t) : {Fs.FsDir{nm, 0n, Fs.shape(Fs.sum(ks))} <> Fs.shape(Fs.sum(t)) == Fs.FsDir{nm, 0n, Fs.shape(Fs.sum(ks))} <> _ : List<&2, Fs.Tree>}
+      {==}
+
+# sorting keeps the sizes at the top of a list
+def top_sort(xs: List<&2, Fs.Tree>) -> {Fs.top(Fs.sort(xs)) == Fs.top(xs) : Nat}:
+  match xs:
+    case Nil{}:
+      {==}
+    case Fs.FsFile{nm, sz} <> t:
+      %top_sort(t) : {Nat.add(sz, Fs.top(Fs.sort(t))) == Nat.add(sz, _) : Nat}
+      {==}
+    case Fs.FsDir{nm, sz, ks} <> t:
+      %top_sort(t) : {Nat.add(sz, Fs.top(Fs.sort(t))) == Nat.add(sz, _) : Nat}
+      {==}
+
+# the fused pass, by the hypotheses on a directory's entries and on the
+# rest of the list; top_sort turns the sum's size into the sorted one's
+def Laws.tidy_is_sort_sum(xs):
+  match xs:
+    case Nil{}:
+      {==}
+    case Fs.FsFile{nm, sz} <> t:
+      %Laws.tidy_is_sort_sum(t) : {Fs.FsFile{nm, sz} <> Fs.tidy(t) == Fs.FsFile{nm, sz} <> _ : List<&2, Fs.Tree>}
+      {==}
+    case Fs.FsDir{nm, sz, +ks} <> t:
+      %top_sort(Fs.sum(ks)) : {Fs.tidy.dir(nm, sz, Fs.tidy(ks), Fs.tidy(t)) == Fs.FsDir{nm, Nat.add(sz, _), List.sort(~Fs.Tree, ~Fs.ge, Fs.sort(Fs.sum(ks)))} <> Fs.sort(Fs.sum(t)) : List<&2, Fs.Tree>}
+      %Laws.tidy_is_sort_sum(ks) : {Fs.tidy.dir(nm, sz, Fs.tidy(ks), Fs.tidy(t)) == Fs.FsDir{nm, Nat.add(sz, Fs.top(_)), List.sort(~Fs.Tree, ~Fs.ge, _)} <> Fs.sort(Fs.sum(t)) : List<&2, Fs.Tree>}
+      %Laws.tidy_is_sort_sum(t) : {Fs.tidy.dir(nm, sz, Fs.tidy(ks), Fs.tidy(t)) == Fs.FsDir{nm, Nat.add(sz, Fs.top(Fs.tidy(ks))), List.sort(~Fs.Tree, ~Fs.ge, Fs.tidy(ks))} <> _ : List<&2, Fs.Tree>}
       {==}
 
 # a pair is the pair of its parts

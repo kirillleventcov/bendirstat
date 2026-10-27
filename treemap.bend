@@ -22,9 +22,9 @@ import ./report.bend as Report
 # its directory's entries, its name and size; a directory holds the
 # layout of its entries, none when its box was too small.
 type Lay is Data:
-  LFile{x0: U32, y0: U32, x1: U32, y1: U32, idx: Nat, name: String, size: Nat,
+  LFile{x0: U32, y0: U32, x1: U32, y1: U32, idx: Nat, name: Fs.Name, size: Nat,
     color: U32}
-  LDir{x0: U32, y0: U32, x1: U32, y1: U32, idx: Nat, name: String, size: Nat,
+  LDir{x0: U32, y0: U32, x1: U32, y1: U32, idx: Nat, name: Fs.Name, size: Nat,
     kids: List<&2, Lay>}
 
 def width() -> U32:
@@ -61,17 +61,17 @@ def shade(+c: U32, +num: U32, +den: U32) -> U32:
   U32.or(channel(c, 16n, num, den),
     U32.or(channel(c, 8n, num, den), channel(c, 0n, num, den)))
 
-# a small hash of a name, to vary the shade of like files
-def hash.go(s: String, +h: U32) -> U32:
-  match s:
-    case SNil{}:
+# a small hash of a name's bytes, to vary the shade of like files
+def hash.go(bs: List<&2, Nat>, +h: U32) -> U32:
+  match bs:
+    case Nil{}:
       h
-    case SCon{Chr{x}, t}:
-      hash.go(t, U32.add(U32.mul(h, 31), x))
+    case b <> t:
+      hash.go(t, U32.add(U32.mul(h, 31), U32.from_nat(b)))
 
-def color_of(nm: String) -> U32:
+def color_of(nm: Fs.Name) -> U32:
   +n = nm
-  +h = hash.go(n, 7)
+  +h = hash.go(Fs.bytes(n), 7)
   shade(palette(Nat.mod(Nat.add(Report.ext.of(n), U32.to_nat(h)), 16n)),
     U32.add(13, U32.mod(U32.shrn(h, 8n), 5)), 15)
 
@@ -133,10 +133,9 @@ def cut.rsum(c: Cut) -> Nat:
     case Cut{l, ls, ln, r, rs}:
       rs
 
-# the left part's share of the box
-def frac(c: Cut, +total: Nat) -> F32:
-  Bool.pick(F32, Nat.is_eq(total, 0n), 0.5,
-    F32.div(f32(cut.lsum(c)), f32(total)))
+# the left part's share of the box, lsum of total
+def frac(+lsum: Nat, +total: Nat) -> F32:
+  Bool.pick(F32, Nat.is_eq(total, 0n), 0.5, F32.div(f32(lsum), f32(total)))
 
 # the box (x0, y0, x1, y1) is wider than tall: it splits at an x
 def wide(+x0: F32, +y0: F32, +x1: F32, +y1: F32) -> Bool:
@@ -177,14 +176,28 @@ def lay(
                 lay(d, Bool.pick(Nat, tiny, 0n, List.length(&2, Fs.Tree, ks)), ks,
                   sz, 0n, F32.add(x0, 1.0), F32.add(y0, 1.0), x1, y1)}]
             case h <> t:
+              # the cut is taken apart before the fork: each half owns
+              # its part, and no task reads a node another one holds
               +c = cut(h <> t, total)
               +w = wide(x0, y0, x1, y1)
-              +xm = mid(x0, x1, frac(c, total))
-              +ym = mid(y0, y1, frac(c, total))
-              a b = lay(depth, f, cut.left(c), cut.lsum(c), idx0, x0, y0,
-                  Bool.pick(F32, w, xm, x1), Bool.pick(F32, w, y1, ym))
-                lay(depth, f, cut.right(c), cut.rsum(c), Nat.add(idx0, cut.llen(c)),
-                  Bool.pick(F32, w, xm, x0), Bool.pick(F32, w, y0, ym), x1, y1)
+              +fr = frac(cut.lsum(c), total)
+              +xm = mid(x0, x1, fr)
+              +ym = mid(y0, y1, fr)
+              # every argument is computed before the fork: on Bend 2.0.39 a
+              # parallel call whose arguments read a shared local (cut.left(c)
+              # here, cut.right(c) there) can lose its result on more than
+              # one thread ("frontier drained without a result")
+              l = cut.left(c)
+              ls = cut.lsum(c)
+              r = cut.right(c)
+              rs = cut.rsum(c)
+              i1 = Nat.add(idx0, cut.llen(c))
+              ax1 = Bool.pick(F32, w, xm, x1)
+              ay1 = Bool.pick(F32, w, y1, ym)
+              bx0 = Bool.pick(F32, w, xm, x0)
+              by0 = Bool.pick(F32, w, y0, ym)
+              a b = lay(depth, f, l, ls, idx0, x0, y0, ax1, ay1)
+                lay(depth, f, r, rs, i1, bx0, by0, x1, y1)
               List.append(&2, Lay, a, b)
 
 # the layout of a directory's entries over the window
@@ -361,10 +374,13 @@ def draw(+k: Nat, +x: U32, +y: U32, +cs: List<&2, Lay>, isflat: Bool) -> Image:
           +c10 = cands.of(cs, xr, y, h)
           +c01 = cands.of(cs, x, yb, h)
           +c11 = cands.of(cs, xr, yb, h)
-          tl tr bl br = draw(e, x, y, c00, flat(c00, x, y, h))
-            draw(e, xr, y, c10, flat(c10, xr, y, h))
-            draw(e, x, yb, c01, flat(c01, x, yb, h))
-            draw(e, xr, yb, c11, flat(c11, xr, yb, h))
+          # the verdicts before the fork, as in lay
+          f00 = flat(c00, x, y, h)
+          f10 = flat(c10, xr, y, h)
+          f01 = flat(c01, x, yb, h)
+          f11 = flat(c11, xr, yb, h)
+          tl tr bl br = draw(e, x, y, c00, f00) draw(e, xr, y, c10, f10)
+            draw(e, x, yb, c01, f01) draw(e, xr, yb, c11, f11)
           Qua{tl, tr, bl, br}
 
 def render(boxes: List<&2, Lay>) -> Image:
@@ -385,8 +401,8 @@ def holds.head(xs: List<&2, Lay>, +x: U32, +y: U32) -> Bool:
     case h <> t:
       holds(h, x, y)
 
-def entry(+path: String, nm: String, +sz: Nat, +total: Nat, dir: Bool) -> String:
-  path ++ nm ++ Bool.pick(String, dir, "/", "") ++ "  " ++ Fmt.human(sz) ++ "  "
+def entry(+path: String, nm: Fs.Name, +sz: Nat, +total: Nat, dir: Bool) -> String:
+  path ++ Fs.text(nm) ++ Bool.pick(String, dir, "/", "") ++ "  " ++ Fmt.human(sz) ++ "  "
     ++ Fmt.pct(sz, total)
 
 # the deepest entry under (x, y), with its path from the shown root;
@@ -409,7 +425,7 @@ def under(
           under(t, holds.head(t, x, y), x, y, path, total)
         case True{}:
           Maybe.or(&2, String,
-            under(ks, holds.head(ks, x, y), x, y, path ++ nm ++ "/", total),
+            under(ks, holds.head(ks, x, y), x, y, path ++ Fs.text(nm) ++ "/", total),
             Some{entry(path, nm, sz, total, True{})})
 
 def under.of(+xs: List<&2, Lay>, +x: U32, +y: U32, +path: String, +total: Nat) ->
@@ -472,21 +488,23 @@ def act.of(events: List<Event>, a: Act) -> Act:
       act.of(rest, Act{quit, up, zoom, x, y, True{}})
     case Close{} <> rest Act{quit, up, zoom, mx, my, moved}:
       act.of(rest, Act{True{}, up, zoom, mx, my, moved})
+    case e <> rest a2:
+      act.of(rest, a2)
 
 # the text of the shown directory: its path from the root
 def crumbs(path: List<&2, Nat>, root: Fs.Tree, acc: String) -> String:
   match path root:
     case Nil{} r:
-      acc ++ Fs.name(r)
+      acc ++ Fs.text(Fs.name(r))
     case i <> rest Fs.FsFile{nm, sz}:
-      acc ++ nm
+      acc ++ Fs.text(nm)
     case i <> rest Fs.FsDir{+nm, sz, ks}:
       crumbs(rest, Maybe.default(&2, Fs.Tree, Fs.at(ks, i), Fs.FsDir{nm, 0n, Nil{}}),
-        acc ++ nm ++ "/")
+        acc ++ Fmt.slashed(Fs.text(nm)))
 
 # the view of the directory at path, laid out and drawn
 def show(+root: Fs.Tree, +path: List<&2, Nat>, +mx: U32, +my: U32) -> View:
-  +cur = Maybe.default(&2, Fs.Tree, Fs.walk(path, root), Fs.probe(0n))
+  +cur = Maybe.default(&2, Fs.Tree, Fs.walk(path, root), Fs.blank())
   +boxes = layout(cur)
   View{root, path, boxes, render(boxes), crumbs(path, root, ""), mx, my}
 
@@ -496,7 +514,7 @@ def shown(+root: Fs.Tree, +path: List<&2, Nat>) -> String:
 
 def title.of(+v: View) -> String:
   View{+root, +path, boxes, img, title, mx, my} = v
-  +cur = Maybe.default(&2, Fs.Tree, Fs.walk(path, root), Fs.probe(0n))
+  +cur = Maybe.default(&2, Fs.Tree, Fs.walk(path, root), Fs.blank())
   +base = "bendirstat  " ++ shown(root, path) ++ "  " ++ Fmt.human(Fs.size(cur))
   Maybe.default(&2, String, Maybe.map(&2, String, String,
     s => base ++ "   ▸ " ++ s, under.of(boxes, mx, my, "", Fs.size(cur))), base)
